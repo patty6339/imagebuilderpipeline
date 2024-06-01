@@ -1,0 +1,196 @@
+Parameters:
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64'
+    Description: The ID of the latest Amazon Machine Image (AMI) to use for building the image.
+  AppName:
+    Type: String
+    Default: "MyApp"
+    Description: The name of the application.
+  
+  ImageVersion:
+    Type: String
+    Default: "1.0.0"
+    Description: The version of the image.
+  
+  InstanceType:
+    Type: String
+    Default: "t3.small"
+    Description: The EC2 instance type to use for building the image.
+  
+  KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: "cfstack"
+    Description: The name of the EC2 key pair to use for SSH access.
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+    Description: The Amazon Virtual Private Cloud (VPC) for the image builder.
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Description: The internet gateway for the VPC.
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+    Description: Attaches the internet gateway to the VPC.
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+    Description: The public subnet for the image builder.
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+    Description: The route table for the VPC.
+     
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+    Description: The route for internet access.
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+    Description: Associates the public subnet with the route table.
+
+  ImageBuilderSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow access to Image Builder instance.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+    Description: The security group for the image builder instance.
+
+  ImageBuilderRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+              - cloudformation.sync.codeconnevtion.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AWSImageBuilderReadOnlyAccess
+      Path: /
+    Description: The IAM role for the image builder.
+
+  ImageBuilderInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Roles:
+        - !Ref ImageBuilderRole
+    Description: The instance profile for the image builder.
+      
+  DistributionConfiguration:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: !Sub "${AppName} Image - Distribution Configuration"
+      Distributions:
+        - AmiDistributionConfiguration:
+            Name: !Sub "${AppName} Image - AmiCopyConfiguration - {{ imagebuilder:buildDate }}"
+            LaunchPermissionConfiguration:
+              UserIds:
+                - !Ref AWS::AccountId
+          Region: !Ref AWS::Region
+    Description: The distribution configuration for the image.
+
+  ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Components:
+        - ComponentArn: !GetAtt Component.Arn
+      Name: !Sub "${AppName} Image"
+      ParentImage: !Ref LatestAmiId
+      Version: !Ref ImageVersion
+    DependsOn:
+      - Component
+    Description: The image recipe for building the image.
+    
+  Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub "${AppName} Image - Component"
+      Platform: Linux
+      Version: !Ref ImageVersion
+      Data: |
+        name: Update and Patch System
+        description: Update and patch the system.
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: UpdateSystem
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum update -y
+              - name: InstallPython3
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install python3 -y
+    Description: The component for updating and patching the system.
+
+  InfrastructureConfiguration:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: !Sub "${AppName} Infrastructure Configuration"
+      InstanceProfileName: !Ref ImageBuilderInstanceProfile
+      InstanceTypes:
+        - !Ref InstanceType
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref ImageBuilderSecurityGroup
+      KeyPair: !Ref KeyPair
+      TerminateInstanceOnFailure: true
+    Description: The infrastructure configuration for the image builder.
+
+  ImagePipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Description: !Sub "${AppName} Image Pipeline"
+      DistributionConfigurationArn: !Ref DistributionConfiguration
+      ImageRecipeArn: !Ref ImageRecipe
+      InfrastructureConfigurationArn: !Ref InfrastructureConfiguration
+      Name: !Sub "${AppName} Image Pipeline"
+      Status: ENABLED
+      Schedule:
+        ScheduleExpression: "cron(0 0 1 * ? *)" # Runs at midnight on the first day of every month
+        PipelineExecutionStartCondition: "EXPRESSION_MATCH_ONLY"
+      ImageTestsConfiguration:
+        ImageTestsEnabled: true
+        TimeoutMinutes: 90
+    DependsOn:
+      - DistributionConfiguration
+      - ImageRecipe
+      - InfrastructureConfiguration
+    Description: The image pipeline for building and testing the image.
