@@ -1,0 +1,8 @@
+template-file-path: template.yaml
+parameters:
+  KeyPair: cfstack
+  ImageVersion: 1.0.0
+  InstanceType: t3.small
+  LatestAmiId: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64
+  AppName: MyApp
+tags: {}
